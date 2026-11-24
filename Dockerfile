@@ -13,6 +13,7 @@ COPY backend/requirements.txt .
 RUN pip install --no-cache-dir -r requirements.txt
 COPY backend/ ./
 COPY --from=web /web/dist ./static
-ENV DB_PATH=/data/impact.db STATIC_DIR=/app/static PORT=8000
-# Fresh demo data on every start, so dates are always relative to today
-CMD ["sh", "-c", "python -m app.seed && uvicorn app.main:app --host 0.0.0.0 --port ${PORT}"]
+ENV DB_PATH=/app/data/impact.db STATIC_DIR=/app/static PORT=8000 WARM_CACHE=1
+# Seed once at build time: every container start reuses the same dataset (dates are as of the build day).
+RUN python -m app.seed
+CMD ["sh", "-c", "uvicorn app.main:app --host 0.0.0.0 --port ${PORT}"]

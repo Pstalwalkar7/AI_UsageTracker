@@ -179,7 +179,13 @@ export interface Meta {
   }
 }
 
+/** Last response per GET path, so revisiting a screen paints instantly while it refreshes. */
+const responseCache = new Map<string, unknown>()
+const READ_ONLY_POSTS = new Set(['/api/runs/preview', '/api/ideas/score'])
+
 export async function api<T>(path: string, init?: RequestInit): Promise<T> {
+  const method = (init?.method ?? 'GET').toUpperCase()
+  if (method !== 'GET' && !READ_ONLY_POSTS.has(path)) responseCache.clear()
   const res = await fetch(path, {
     ...init,
     headers: { 'Content-Type': 'application/json', ...(init?.headers ?? {}) },
@@ -197,14 +203,18 @@ export async function api<T>(path: string, init?: RequestInit): Promise<T> {
 
 /** Fetch on mount and whenever `path` changes. `version` lets callers force a refetch. */
 export function useApi<T>(path: string | null, version = 0) {
-  const [data, setData] = useState<T | null>(null)
+  const [data, setData] = useState<T | null>(() => (path ? (responseCache.get(path) as T) ?? null : null))
   const [error, setError] = useState<string | null>(null)
   const [loading, setLoading] = useState(false)
   const load = useCallback(async () => {
     if (!path) return
-    setLoading(true)
+    const cached = responseCache.get(path) as T | undefined
+    if (cached !== undefined) setData(cached)
+    setLoading(cached === undefined)
     try {
-      setData(await api<T>(path))
+      const fresh = await api<T>(path)
+      responseCache.set(path, fresh)
+      setData(fresh)
       setError(null)
     } catch (e) {
       setError((e as Error).message)

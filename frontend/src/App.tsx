@@ -55,9 +55,9 @@ function readTheme(): Theme {
   if (q === 'light' || q === 'dark' || q === 'auto') return q
   try {
     const t = localStorage.getItem('theme')
-    if (t === 'light' || t === 'dark') return t
+    if (t === 'light' || t === 'dark' || t === 'auto') return t
   } catch { /* storage unavailable */ }
-  return 'auto'
+  return 'light'
 }
 
 const RANGE_LABEL: Record<RangeKey, string> = { '1m': '30 days', '3m': '90 days', '6m': '6 months' }

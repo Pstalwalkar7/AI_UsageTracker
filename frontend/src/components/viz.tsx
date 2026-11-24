@@ -2,14 +2,13 @@
  * Visual forms for usage data:
  *  - Funnel:        runs → completed → used → used as-is (the "sales pipeline" of AI usage)
  *  - FunnelStrips:  the same funnel for many tools as overlapping (nested) bars, so shapes compare at a glance
- *  - Waterfall:     how each tool adds to (or subtracts from) the portfolio's net return
+ *  - NetValueBars:  each tool's net value from a common zero line, ranked best first
  *  - UsageFlow:     Sankey from department → tool → what happened to the output
  */
 import { Fragment, useState } from 'react'
-import { Bar, BarChart, Cell, LabelList, ReferenceLine, ResponsiveContainer, Sankey, Text, Tooltip, XAxis, YAxis } from 'recharts'
+import { ResponsiveContainer, Sankey, Tooltip } from 'recharts'
 import type { FunnelStage } from '../api'
-import { num, pct, usd } from '../format'
-import { axisProps, TipBox } from './charts'
+import { num, pct, roiX, usd } from '../format'
 
 // ---------------------------------------------------------------------------
 // Funnel
@@ -105,50 +104,44 @@ export function FunnelStrips({ rows, onSelect }: { rows: StripRow[]; onSelect?: 
 }
 
 // ---------------------------------------------------------------------------
-// Waterfall: net value by tool, then the total
+// Net value bars: one bar per tool, all measured from the same zero line, best first
 // ---------------------------------------------------------------------------
-export interface WaterfallItem { id: number; name: string; value: number }
+export interface NetValueItem { id: number; name: string; value: number; gross: number; cost: number; roi: number | null }
 
-function WrappedTick(props: { x?: number; y?: number; payload?: { value: string } }) {
+export function NetValueBars({ items, onSelect }: { items: NetValueItem[]; onSelect?: (id: number) => void }) {
+  const rows = [...items].sort((a, b) => b.value - a.value)
+  const lo = Math.min(0, ...rows.map(r => r.value))
+  const hi = Math.max(0, ...rows.map(r => r.value))
+  const span = hi - lo || 1
+  const zero = (-lo / span) * 100
   return (
-    <Text x={props.x} y={(props.y ?? 0) + 6} width={104} textAnchor="middle" verticalAnchor="start" fontSize={11} fill="var(--ink-2)">
-      {props.payload?.value ?? ''}
-    </Text>
-  )
-}
-
-export function Waterfall({ items, totalLabel = 'Net return', onSelect }: { items: WaterfallItem[]; totalLabel?: string; onSelect?: (id: number) => void }) {
-  let cum = 0
-  const data = items.map(it => {
-    const base = it.value >= 0 ? cum : cum + it.value
-    cum += it.value
-    return { ...it, base, delta: Math.abs(it.value), signed: it.value, kind: it.value >= 0 ? 'up' : 'down', end: cum }
-  })
-  data.push({ id: -1, name: totalLabel, value: cum, base: 0, delta: Math.abs(cum), signed: cum, kind: 'total', end: cum })
-  const color = (k: string) => (k === 'up' ? 'var(--series-1)' : k === 'down' ? 'var(--negative)' : 'var(--ink-2)')
-  return (
-    <div className="h-80">
-      <ResponsiveContainer>
-        <BarChart data={data} margin={{ top: 24, right: 8, left: 0, bottom: 8 }} barCategoryGap="18%">
-          <XAxis dataKey="name" {...axisProps} interval={0} height={56} tick={<WrappedTick />} />
-          <YAxis {...axisProps} axisLine={false} tickFormatter={v => usd(v, { compact: true })} width={56} />
-          <ReferenceLine y={0} stroke="var(--axis)" />
-          <Tooltip cursor={{ fill: 'var(--surface-2)' }} content={({ active, payload }) => {
-            if (!active || !payload?.length) return null
-            const p = payload[0].payload as (typeof data)[number]
-            return <TipBox title={p.name} rows={p.kind === 'total'
-              ? [{ label: 'Sum of all tools', value: usd(p.value) }]
-              : [{ color: color(p.kind), label: 'Net value (value − cost)', value: usd(p.signed) }, { label: 'Running total', value: usd(p.end) }]} />
-          }} />
-          <Bar dataKey="base" stackId="w" fill="transparent" isAnimationActive={false} />
-          <Bar dataKey="delta" stackId="w" isAnimationActive={false} radius={[4, 4, 4, 4]}
-            onClick={(d: { id?: number }) => d.id && d.id > 0 && onSelect?.(d.id)} style={{ cursor: onSelect ? 'pointer' : undefined }}>
-            {data.map(d => <Cell key={d.id} fill={color(d.kind)} />)}
-            <LabelList dataKey="signed" position="top" fontSize={11} fill="var(--ink-2)"
-              formatter={(v: number) => `${v > 0 ? '+' : ''}${usd(v, { compact: true })}`} />
-          </Bar>
-        </BarChart>
-      </ResponsiveContainer>
+    <div role="list" aria-label="Net value by tool, highest first">
+      {rows.map((r, i) => {
+        const neg = r.value < 0
+        const left = neg ? zero - (-r.value / span) * 100 : zero
+        const width = Math.max(0.4, (Math.abs(r.value) / span) * 100)
+        const tip = `${r.name}: net ${usd(r.value)} (value ${usd(r.gross)} − cost ${usd(r.cost)})`
+        return (
+          <button key={r.id} type="button" role="listitem" onClick={() => onSelect?.(r.id)} title={tip}
+            className="group grid w-full grid-cols-[minmax(0,1fr)_76px] items-center gap-x-3 rounded-lg px-2 py-1.5 text-left hover:bg-surface-2 sm:grid-cols-[24px_200px_minmax(0,1fr)_84px]">
+            <span className="hidden text-xs text-muted tnum sm:block">{i + 1}</span>
+            <span className="min-w-0">
+              <span className="block truncate text-sm font-medium text-ink">{r.name}</span>
+              <span className="block truncate text-xs text-muted tnum">{usd(r.gross, { compact: true })} value − {usd(r.cost, { compact: true })} cost</span>
+            </span>
+            <span className="relative col-span-2 order-last mt-1 block h-5 sm:order-none sm:col-span-1 sm:mt-0">
+              <span aria-hidden className="absolute inset-y-[-6px] w-px" style={{ left: `${zero}%`, background: 'var(--axis)' }} />
+              <span className="absolute inset-y-0"
+                style={{ left: `${left}%`, width: `${width}%`, background: neg ? 'var(--negative)' : 'var(--series-1)',
+                  borderRadius: neg ? '4px 0 0 4px' : '0 4px 4px 0' }} />
+            </span>
+            <span className={`text-right text-sm font-semibold tnum ${neg ? 'text-bad-text' : 'text-ink'}`}>
+              {r.value > 0 ? '+' : ''}{usd(r.value, { compact: true })}
+              <span className="block text-xs font-normal text-muted">{roiX(r.roi)} ROI</span>
+            </span>
+          </button>
+        )
+      })}
     </div>
   )
 }

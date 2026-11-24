@@ -87,7 +87,7 @@ def outcome_buckets(conn, start: date, end: date, extra: Tuple[str, ...] = ()) -
         f"""SELECT tool_id{extra_sql}, outcome, COUNT(*) n,
                    SUM(human_minutes_with_ai) h, SUM(api_cost_usd) c
             FROM runs
-            WHERE substr(timestamp,1,10) BETWEEN ? AND ?
+            WHERE timestamp >= ? AND timestamp < date(?, '+1 day')
             GROUP BY tool_id{extra_sql}, outcome""",
         (start.isoformat(), end.isoformat()),
     ).fetchall()
@@ -108,7 +108,7 @@ def active_users(conn, start: date, end: date, by: Optional[str] = None) -> Dict
     grp = f"GROUP BY {by}" if by else ""
     rows = conn.execute(
         f"""SELECT {sel} COUNT(DISTINCT user_id) FROM runs
-            WHERE user_id IS NOT NULL AND substr(timestamp,1,10) BETWEEN ? AND ? {grp}""",
+            WHERE user_id IS NOT NULL AND timestamp >= ? AND timestamp < date(?, '+1 day') {grp}""",
         (start.isoformat(), end.isoformat())).fetchall()
     return {r[0]: r[1] for r in rows}
 
@@ -193,11 +193,12 @@ def portfolio(conn, range_key: str) -> dict:
     }
 
 
-def monthly_series(conn, start: date, end: date, tool_ids: Optional[List[int]] = None) -> List[dict]:
-    """Value, cost and ROI per calendar month, summed across the given tools."""
+def monthly_series(conn, start: date, end: date, tool_ids: Optional[List[int]] = None, buckets=None) -> List[dict]:
+    """Value, cost and ROI per calendar month, summed across the given tools.
+    Pass `buckets` (from outcome_buckets(..., (MONTH,)) over the same window) to reuse one query across calls."""
     tools = {t["id"]: t for t in load_tools(conn)}
     ids = tool_ids or list(tools)
-    b = outcome_buckets(conn, start, end, (MONTH,))
+    b = buckets if buckets is not None else outcome_buckets(conn, start, end, (MONTH,))
     out = []
     for label, ms, me in months_in(start, end):
         tms = [m.compute_tool_metrics(assumptions(tools[i]), b.get((i, label), {}), ms, me) for i in ids]
@@ -266,14 +267,14 @@ def tool_detail(conn, tool_id: int, range_key: str) -> Optional[dict]:
 
     rows = conn.execute(
         """SELECT failure_reason r, outcome, COUNT(*) n FROM runs
-           WHERE tool_id=? AND failure_reason IS NOT NULL AND substr(timestamp,1,10) BETWEEN ? AND ?
+           WHERE tool_id=? AND failure_reason IS NOT NULL AND timestamp >= ? AND timestamp < date(?, '+1 day')
            GROUP BY failure_reason, outcome ORDER BY n DESC""", (tool_id, s, e)).fetchall()
     total_runs = item["metrics"]["runs"] or 1
     item["failure_reasons"] = [{"reason": r["r"], "outcome": r["outcome"], "runs": r["n"], "share_of_runs": r["n"] / total_runs} for r in rows]
 
     rows = conn.execute(
         f"""SELECT {MONTH} month, failure_reason r, COUNT(*) n FROM runs
-            WHERE tool_id=? AND failure_reason IS NOT NULL AND substr(timestamp,1,10) BETWEEN ? AND ?
+            WHERE tool_id=? AND failure_reason IS NOT NULL AND timestamp >= ? AND timestamp < date(?, '+1 day')
             GROUP BY month, r""", (tool_id, s, e)).fetchall()
     by_month = defaultdict(dict)
     for r in rows:
@@ -284,7 +285,7 @@ def tool_detail(conn, tool_id: int, range_key: str) -> Optional[dict]:
     rows = conn.execute(
         """SELECT model_name, COUNT(*) n, SUM(api_cost_usd) c,
                   SUM(outcome IN ('accepted','edited')) ok
-           FROM runs WHERE tool_id=? AND substr(timestamp,1,10) BETWEEN ? AND ?
+           FROM runs WHERE tool_id=? AND timestamp >= ? AND timestamp < date(?, '+1 day')
            GROUP BY model_name ORDER BY c DESC""", (tool_id, s, e)).fetchall()
     item["models"] = [{"model": r["model_name"], "runs": r["n"], "api_cost": r["c"],
                        "acceptance_rate": m.safe_div(r["ok"], r["n"]),
@@ -292,7 +293,7 @@ def tool_detail(conn, tool_id: int, range_key: str) -> Optional[dict]:
 
     rows = conn.execute(
         f"""SELECT {WEEK} wk, COUNT(*) n, COUNT(DISTINCT user_id) u, SUM(outcome IN ('accepted','edited')) ok
-            FROM runs WHERE tool_id=? AND substr(timestamp,1,10) BETWEEN ? AND ?
+            FROM runs WHERE tool_id=? AND timestamp >= ? AND timestamp < date(?, '+1 day')
             GROUP BY wk ORDER BY wk""", (tool_id, s, e)).fetchall()
     item["weekly"] = [{
         "week": r["wk"], "runs": r["n"], "active_users": r["u"],
@@ -319,7 +320,7 @@ def spend(conn, range_key: str) -> dict:
     rows = conn.execute(
         """SELECT model_name, COUNT(*) n, SUM(api_cost_usd) c, SUM(outcome IN ('accepted','edited')) ok,
                   COUNT(DISTINCT tool_id) tools
-           FROM runs WHERE substr(timestamp,1,10) BETWEEN ? AND ? GROUP BY model_name ORDER BY c DESC""",
+           FROM runs WHERE timestamp >= ? AND timestamp < date(?, '+1 day') GROUP BY model_name ORDER BY c DESC""",
         (s, e)).fetchall()
     by_model = [{"model": r["model_name"], "runs": r["n"], "api_cost": r["c"], "tools": r["tools"],
                  "acceptance_rate": m.safe_div(r["ok"], r["n"]),
@@ -328,7 +329,7 @@ def spend(conn, range_key: str) -> dict:
 
     rows = conn.execute(
         f"""SELECT {MONTH} month, model_name, SUM(api_cost_usd) c FROM runs
-            WHERE substr(timestamp,1,10) BETWEEN ? AND ? GROUP BY month, model_name""", (s, e)).fetchall()
+            WHERE timestamp >= ? AND timestamp < date(?, '+1 day') GROUP BY month, model_name""", (s, e)).fetchall()
     api_by_month = defaultdict(dict)
     for r in rows:
         api_by_month[r["month"]][r["model_name"]] = r["c"]
@@ -340,8 +341,9 @@ def spend(conn, range_key: str) -> dict:
     ms = last_complete_months(end, 4)
     prev_m, cur_m = ms[0], ms[-1]
     growth = []
+    growth_buckets = outcome_buckets(conn, prev_m[1], cur_m[2], (MONTH,))
     for t in p["tools"]:
-        ser = monthly_series(conn, prev_m[1], cur_m[2], [t["id"]])
+        ser = monthly_series(conn, prev_m[1], cur_m[2], [t["id"]], growth_buckets)
         prev, cur = ser[0], ser[-1]
         if prev["runs"] == 0 or date.fromisoformat(t["launch_date"]) > prev_m[1]:
             continue

@@ -6,9 +6,10 @@ from datetime import date, datetime, timezone
 from pathlib import Path
 from typing import Literal, Optional
 
-from fastapi import FastAPI, HTTPException, Query
+from fastapi import FastAPI, HTTPException, Query, Request
 from fastapi.middleware.cors import CORSMiddleware
-from fastapi.responses import FileResponse
+from fastapi.middleware.gzip import GZipMiddleware
+from fastapi.responses import FileResponse, Response
 from fastapi.staticfiles import StaticFiles
 from pydantic import BaseModel, Field
 
@@ -21,6 +22,77 @@ conn = db.connect()
 db.init_db(conn)
 if db.is_empty(conn) or db.is_outdated(conn):
     seeder.seed(conn)
+
+
+# ---------------------------------------------------------------------------
+# Response cache. Data only changes through this app's own write endpoints, so
+# every GET /api/* response is cached until the next write clears it.
+# ---------------------------------------------------------------------------
+_cache: dict[str, tuple[int, bytes, str]] = {}
+READ_ONLY_POSTS = {"/api/runs/preview", "/api/ideas/score"}  # POSTs that compute but don't write
+
+
+@app.middleware("http")
+async def api_cache(request: Request, call_next):
+    path = request.url.path
+    if not path.startswith("/api/"):
+        resp = await call_next(request)
+        if path.startswith("/assets/"):  # Vite file names are content-hashed
+            resp.headers["Cache-Control"] = "public, max-age=31536000, immutable"
+        return resp
+
+    if request.method != "GET":
+        resp = await call_next(request)
+        if path not in READ_ONLY_POSTS:
+            _cache.clear()
+        return resp
+
+    key = f"{path}?{request.url.query}"
+    if key in _cache:
+        status, body, ctype = _cache[key]
+        return Response(body, status_code=status, media_type=ctype, headers={"X-Cache": "HIT"})
+    resp = await call_next(request)
+    if resp.status_code != 200:
+        return resp
+    body = b"".join([chunk async for chunk in resp.body_iterator])
+    ctype = resp.headers.get("content-type", "application/json")
+    _cache[key] = (200, body, ctype)
+    return Response(body, status_code=200, media_type=ctype, headers={"X-Cache": "MISS"})
+
+
+def _warm_cache() -> None:
+    """Request every screen once after startup so the first visitor gets cached responses."""
+    import time
+    import urllib.request
+
+    base = f"http://127.0.0.1:{os.environ.get('PORT', '8000')}"
+    for _ in range(60):  # wait for uvicorn to accept connections
+        try:
+            urllib.request.urlopen(f"{base}/api/meta", timeout=5).read()
+            break
+        except OSError:
+            time.sleep(0.5)
+    tool_ids = [r[0] for r in conn.execute("SELECT id FROM tools ORDER BY id")]
+    paths = ["/api/ideas"]
+    for r in ("6m", "3m", "1m"):  # 6m is the default range, so warm it first
+        paths += [f"/api/{p}?range={r}" for p in ("summary", "tools", "spend", "departments")]
+        paths += [f"/api/tools/{i}?range={r}" for i in tool_ids]
+    for p in paths:
+        try:
+            urllib.request.urlopen(base + p, timeout=60).read()
+        except OSError:
+            pass
+
+
+@app.on_event("startup")
+async def _start_warmup() -> None:
+    if os.environ.get("WARM_CACHE") == "1":
+        import threading
+        threading.Thread(target=_warm_cache, daemon=True).start()
+
+
+# Added last so it wraps everything, cached responses included (the JS bundle is ~785 KB raw, ~220 KB gzipped).
+app.add_middleware(GZipMiddleware, minimum_size=1024)
 
 RangeQ = Query(service.DEFAULT_RANGE, pattern="^(1m|3m|6m)$")
 Outcome = Literal["accepted", "edited", "rejected", "failed"]

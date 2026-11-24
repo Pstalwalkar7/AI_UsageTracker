@@ -5,7 +5,7 @@ import { useApi, type Summary as S } from '../api'
 import { useApp } from '../App'
 import { axisProps, gridProps, TipBox } from '../components/charts'
 import { Card, Delta, ErrorBox, Explain, FlagBadge, Formula, LegendItem, Loading, PageHeader, Stat, Td, Th } from '../components/ui'
-import { Waterfall } from '../components/viz'
+import { NetValueBars } from '../components/viz'
 import { dateLabel, monthLabel, num, pct, roiX, usd } from '../format'
 
 const RANGE_WORDS = { '1m': 'the last 30 days', '3m': 'the last 90 days', '6m': 'the last 6 months' }
@@ -135,7 +135,7 @@ export default function Summary() {
       </div>
 
       <Card className="mt-4" title="Where the net return comes from"
-        subtitle="Each bar is one tool's net value (value − cost), stacked into the total. Bars below the line cost more than they return."
+        subtitle="Net value (value − cost) per tool, best first. Red bars cost more than they return."
         action={<button onClick={() => setShowTable(s => !s)} className="whitespace-nowrap text-sm font-medium text-accent hover:underline">{showTable ? 'Show chart' : 'Show as table'}</button>}>
         {showTable ? (
           <div className="overflow-x-auto">
@@ -154,12 +154,18 @@ export default function Summary() {
             </table>
           </div>
         ) : (
-          <Waterfall
-            items={[...data.by_tool].sort((a, b) => b.net_value - a.net_value).map(r => ({ id: r.id, name: r.name, value: r.net_value }))}
-            onSelect={id => navigate(`/tools/${id}`)}
-          />
+          <>
+            <NetValueBars
+              items={data.by_tool.map(r => ({ id: r.id, name: r.name, value: r.net_value, gross: r.value, cost: r.total_cost, roi: r.roi }))}
+              onSelect={id => navigate(`/tools/${id}`)}
+            />
+            <div className="mt-2 flex items-baseline justify-between border-t border-line px-2 pt-3">
+              <span className="text-sm font-medium text-ink-2">Net return, all tools</span>
+              <span className="text-lg font-semibold tnum">{t.net_value > 0 ? '+' : ''}{usd(t.net_value, { compact: true })}</span>
+            </div>
+          </>
         )}
-        <p className="mt-2 text-xs text-muted">Covers {dateLabel(data.start)} to {dateLabel(data.end)}. Click a bar to open that tool.</p>
+        <p className="mt-2 text-xs text-muted">Covers {dateLabel(data.start)} to {dateLabel(data.end)}. Click a row to open that tool.</p>
       </Card>
 
       <div className="mt-4 grid grid-cols-1 gap-4 lg:grid-cols-3">
